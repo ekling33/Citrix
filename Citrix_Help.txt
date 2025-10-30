@@ -1,0 +1,23 @@
+CTX559370 — Windows and Linux Virtual Delivery Agent (VDA) vulnerability.
+Solve: Upgrade affected Windows/Linux VDAs to the fixed VDA builds named in the advisory (apply the Citrix VDA updates/patches listed for your release: CR and the LTSR CU versions called out). Follow the Citrix bulletin to install the exact VDA release that contains the fix. 
+
+CTX678035 — Virtual Delivery Agent (Windows) vulnerability.
+Solve: Update the Windows VDA to the versions identified in the advisory (apply the vendor hotfix/upgrade referenced in CTX678035). See the Citrix KB for the exact fixed build for your CVAD / DaaS release and deploy that VDA patch. 
+
+CTX694820 — Windows Virtual Delivery Agent for CVAD and Citrix DaaS (security bulletin).
+Solve: Upgrade Windows VDA to the minimum fixed release called out (Citrix lists the CR and LTSR releases that contain the fixes — upgrade VDAs to those versions as soon as possible). Follow the KB’s upgrade/install instructions. 
+
+CTX477616 — Citrix StoreFront — XML External Entity (XXE) / access-control-type vulnerability.
+Solve: Upgrade StoreFront to a non-vulnerable build — the KB lists the fixed StoreFront versions (for example 3.0.8000 / 3.12.4000 / 1903+ or later as applicable). Patch or upgrade StoreFront per the article. 
+
+CTX694718 — Citrix Workspace app for Windows — security bulletin (local privilege escalation etc.).
+Solve: Upgrade Citrix Workspace app for Windows to the fixed releases (the advisory recommends CR 2409 or later, or the matching LTSR releases listed). Deploy the fixed Workspace client builds to endpoints. 
+
+CTX678036 — Citrix Workspace app for Windows — local privilege escalation (CVE-2024-6286 referenced).
+Solve: Upgrade Citrix Workspace app for Windows to the fixed versions (the KB maps affected versions and the minimum fixed CR/LTSR builds — apply the update/hotfix Citrix lists). 
+
+CTX691485 — Citrix Workspace app for Windows — two LPE vulnerabilities (CVE-2024-7889 & CVE-2024-7890).
+Solve: Upgrade Workspace app for Windows to a fixed release — CR 2405 (and later) or the equivalent LTSR fixes (2402 CU1 or 2203.1 LTSR CU6 Hotfix 3) per the KB. Deploy these client updates to all Windows endpoints. 
+
+CTX477617 — Citrix Workspace app for Windows — multiple vulnerabilities including local privilege escalation during install/uninstall.
+Solve: Upgrade Citrix Workspace app for Windows to the fixed CR/LTSR versions called out in CTX477617 (apply the hotfix or upgrade per the KB). 
