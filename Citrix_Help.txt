@@ -1,23 +1,98 @@
-CTX559370 — Windows and Linux Virtual Delivery Agent (VDA) vulnerability.
-Solve: Upgrade affected Windows/Linux VDAs to the fixed VDA builds named in the advisory (apply the Citrix VDA updates/patches listed for your release: CR and the LTSR CU versions called out). Follow the Citrix bulletin to install the exact VDA release that contains the fix. 
+# Uninstall-VSCode.ps1
+# Removes Visual Studio Code from remote machines listed in machines.txt
+# Cleans up both registry-based installs and leftover folders
 
-CTX678035 — Virtual Delivery Agent (Windows) vulnerability.
-Solve: Update the Windows VDA to the versions identified in the advisory (apply the vendor hotfix/upgrade referenced in CTX678035). See the Citrix KB for the exact fixed build for your CVAD / DaaS release and deploy that VDA patch. 
+$MachineList = Get-Content -Path ".\machines.txt"
 
-CTX694820 — Windows Virtual Delivery Agent for CVAD and Citrix DaaS (security bulletin).
-Solve: Upgrade Windows VDA to the minimum fixed release called out (Citrix lists the CR and LTSR releases that contain the fixes — upgrade VDAs to those versions as soon as possible). Follow the KB’s upgrade/install instructions. 
+# Define uninstall + cleanup actions
+$ScriptBlock = {
+    Write-Host "========== $env:COMPUTERNAME ==========" -ForegroundColor Cyan
 
-CTX477616 — Citrix StoreFront — XML External Entity (XXE) / access-control-type vulnerability.
-Solve: Upgrade StoreFront to a non-vulnerable build — the KB lists the fixed StoreFront versions (for example 3.0.8000 / 3.12.4000 / 1903+ or later as applicable). Patch or upgrade StoreFront per the article. 
+    # 1️⃣ Try registry-based uninstalls (system-wide + per-user)
+    $uninstallPaths = @(
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
 
-CTX694718 — Citrix Workspace app for Windows — security bulletin (local privilege escalation etc.).
-Solve: Upgrade Citrix Workspace app for Windows to the fixed releases (the advisory recommends CR 2409 or later, or the matching LTSR releases listed). Deploy the fixed Workspace client builds to endpoints. 
+    $vscodeEntries = foreach ($path in $uninstallPaths) {
+        Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -like "Visual Studio Code*" }
+    }
 
-CTX678036 — Citrix Workspace app for Windows — local privilege escalation (CVE-2024-6286 referenced).
-Solve: Upgrade Citrix Workspace app for Windows to the fixed versions (the KB maps affected versions and the minimum fixed CR/LTSR builds — apply the update/hotfix Citrix lists). 
+    if ($vscodeEntries) {
+        foreach ($entry in $vscodeEntries) {
+            $uninstallString = $entry.UninstallString
+            if ($uninstallString) {
+                Write-Host "Uninstalling VSCode using: $uninstallString"
+                try {
+                    Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$uninstallString /VERYSILENT /NORESTART`"" -Wait -ErrorAction Stop
+                    Write-Host "VSCode uninstalled successfully." -ForegroundColor Green
+                }
+                catch {
+                    Write-Warning "Failed to uninstall VSCode. Error: $_"
+                }
+            }
+        }
+    }
+    else {
+        Write-Host "No registry-based VSCode installations found."
+    }
 
-CTX691485 — Citrix Workspace app for Windows — two LPE vulnerabilities (CVE-2024-7889 & CVE-2024-7890).
-Solve: Upgrade Workspace app for Windows to a fixed release — CR 2405 (and later) or the equivalent LTSR fixes (2402 CU1 or 2203.1 LTSR CU6 Hotfix 3) per the KB. Deploy these client updates to all Windows endpoints. 
+    # 2️⃣ Clean up user profile folders
+    Write-Host "Cleaning up user AppData folders..."
+    $userProfileDirs = Get-ChildItem -Path "C:\Users" -Directory -ErrorAction SilentlyContinue |
+                       Where-Object { $_.Name -notin @('Public', 'Default', 'Default User', 'All Users') }
 
-CTX477617 — Citrix Workspace app for Windows — multiple vulnerabilities including local privilege escalation during install/uninstall.
-Solve: Upgrade Citrix Workspace app for Windows to the fixed CR/LTSR versions called out in CTX477617 (apply the hotfix or upgrade per the KB). 
+    foreach ($userDir in $userProfileDirs) {
+        $vscodeAppPath = Join-Path $userDir.FullName "AppData\Local\Programs\Microsoft VS Code"
+        $vscodeDataPath = Join-Path $userDir.FullName "AppData\Roaming\Code"
+        $desktopShortcut = Join-Path $userDir.FullName "Desktop\Visual Studio Code.lnk"
+        $startMenuPath = Join-Path $userDir.FullName "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Visual Studio Code.lnk"
+
+        # Remove leftover folders and shortcuts
+        foreach ($path in @($vscodeAppPath, $vscodeDataPath, $desktopShortcut, $startMenuPath)) {
+            if (Test-Path $path) {
+                try {
+                    Remove-Item -Path $path -Recurse -Force -ErrorAction Stop
+                    Write-Host "Removed: $path"
+                }
+                catch {
+                    Write-Warning "Failed to remove $path. Error: $_"
+                }
+            }
+        }
+    }
+
+    # 3️⃣ Remove any remaining system-wide traces (Program Files)
+    $systemPaths = @(
+        "C:\Program Files\Microsoft VS Code",
+        "C:\Program Files (x86)\Microsoft VS Code"
+    )
+
+    foreach ($sysPath in $systemPaths) {
+        if (Test-Path $sysPath) {
+            try {
+                Remove-Item -Path $sysPath -Recurse -Force -ErrorAction Stop
+                Write-Host "Removed: $sysPath"
+            }
+            catch {
+                Write-Warning "Failed to remove $sysPath. Error: $_"
+            }
+        }
+    }
+
+    Write-Host "Cleanup complete on $env:COMPUTERNAME" -ForegroundColor Green
+    Write-Host ""
+}
+
+# 4️⃣ Run the cleanup on each remote VM
+foreach ($Machine in $MachineList) {
+    Write-Host "Connecting to $Machine..." -ForegroundColor Yellow
+    try {
+        Invoke-Command -ComputerName $Machine -ScriptBlock $ScriptBlock -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Failed to connect to $Machine: $_"
+    }
+}
