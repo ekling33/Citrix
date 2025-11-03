@@ -1,98 +1,110 @@
-# Uninstall-VSCode.ps1
-# Removes Visual Studio Code from remote machines listed in machines.txt
-# Cleans up both registry-based installs and leftover folders
+# ====================================================================
+# Script: Remove-Extensions-Remote.ps1
+# Purpose: Remove specific Microsoft Store apps from multiple PCs
+# Author: Eric’s cleanup script
+# ====================================================================
 
-$MachineList = Get-Content -Path ".\machines.txt"
+# File containing list of target machines (one per line)
+$MachineList = "machines.txt"
 
-# Define uninstall + cleanup actions
-$ScriptBlock = {
-    Write-Host "========== $env:COMPUTERNAME ==========" -ForegroundColor Cyan
+# Apps to remove
+$Apps = @(
+    "Microsoft.Microsoft3DViewer",
+    "Microsoft.WebMediaExtensions",
+    "Microsoft.VP9VideoExtensions"
+)
 
-    # 1️⃣ Try registry-based uninstalls (system-wide + per-user)
-    $uninstallPaths = @(
-        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
-        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
-        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
+# Log file (timestamped)
+$Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$LogFile = "$env:USERPROFILE\Desktop\AppxCleanupLog_$Timestamp.txt"
+
+# Max retries for offline/unreachable machines
+$MaxRetries = 3
+$RetryDelaySeconds = 30
+
+# Function to remove apps on a remote machine
+function Remove-AppsRemote {
+    param (
+        [string]$ComputerName,
+        [array]$Apps
     )
 
-    $vscodeEntries = foreach ($path in $uninstallPaths) {
-        Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayName -like "Visual Studio Code*" }
-    }
+    Write-Host "`n=== Processing $ComputerName ===" -ForegroundColor Cyan
+    Add-Content -Path $LogFile -Value "`n=== $ComputerName ==="
 
-    if ($vscodeEntries) {
-        foreach ($entry in $vscodeEntries) {
-            $uninstallString = $entry.UninstallString
-            if ($uninstallString) {
-                Write-Host "Uninstalling VSCode using: $uninstallString"
-                try {
-                    Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$uninstallString /VERYSILENT /NORESTART`"" -Wait -ErrorAction Stop
-                    Write-Host "VSCode uninstalled successfully." -ForegroundColor Green
-                }
-                catch {
-                    Write-Warning "Failed to uninstall VSCode. Error: $_"
-                }
-            }
-        }
-    }
-    else {
-        Write-Host "No registry-based VSCode installations found."
-    }
-
-    # 2️⃣ Clean up user profile folders
-    Write-Host "Cleaning up user AppData folders..."
-    $userProfileDirs = Get-ChildItem -Path "C:\Users" -Directory -ErrorAction SilentlyContinue |
-                       Where-Object { $_.Name -notin @('Public', 'Default', 'Default User', 'All Users') }
-
-    foreach ($userDir in $userProfileDirs) {
-        $vscodeAppPath = Join-Path $userDir.FullName "AppData\Local\Programs\Microsoft VS Code"
-        $vscodeDataPath = Join-Path $userDir.FullName "AppData\Roaming\Code"
-        $desktopShortcut = Join-Path $userDir.FullName "Desktop\Visual Studio Code.lnk"
-        $startMenuPath = Join-Path $userDir.FullName "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Visual Studio Code.lnk"
-
-        # Remove leftover folders and shortcuts
-        foreach ($path in @($vscodeAppPath, $vscodeDataPath, $desktopShortcut, $startMenuPath)) {
-            if (Test-Path $path) {
-                try {
-                    Remove-Item -Path $path -Recurse -Force -ErrorAction Stop
-                    Write-Host "Removed: $path"
-                }
-                catch {
-                    Write-Warning "Failed to remove $path. Error: $_"
-                }
-            }
-        }
-    }
-
-    # 3️⃣ Remove any remaining system-wide traces (Program Files)
-    $systemPaths = @(
-        "C:\Program Files\Microsoft VS Code",
-        "C:\Program Files (x86)\Microsoft VS Code"
-    )
-
-    foreach ($sysPath in $systemPaths) {
-        if (Test-Path $sysPath) {
-            try {
-                Remove-Item -Path $sysPath -Recurse -Force -ErrorAction Stop
-                Write-Host "Removed: $sysPath"
-            }
-            catch {
-                Write-Warning "Failed to remove $sysPath. Error: $_"
-            }
-        }
-    }
-
-    Write-Host "Cleanup complete on $env:COMPUTERNAME" -ForegroundColor Green
-    Write-Host ""
-}
-
-# 4️⃣ Run the cleanup on each remote VM
-foreach ($Machine in $MachineList) {
-    Write-Host "Connecting to $Machine..." -ForegroundColor Yellow
     try {
-        Invoke-Command -ComputerName $Machine -ScriptBlock $ScriptBlock -ErrorAction Stop
+        Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            param($Apps)
+
+            $Results = @()
+
+            foreach ($app in $Apps) {
+                $Status = "Unknown"
+                try {
+                    # Remove Appx packages for all users
+                    Get-AppxPackage -AllUsers -Name $app -ErrorAction SilentlyContinue | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+
+                    # Remove provisioned (future users)
+                    Get-AppxProvisionedPackage -Online | Where-Object {$_.DisplayName -eq $app} | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
+
+                    # Verify removal
+                    $Check = Get-AppxPackage -AllUsers -Name $app -ErrorAction SilentlyContinue
+                    if ($Check) {
+                        $Status = "FAILED (still detected)"
+                    } else {
+                        $Status = "SUCCESS"
+                    }
+                } catch {
+                    $Status = "ERROR: $($_.Exception.Message)"
+                }
+                $Results += "$app : $Status"
+            }
+
+            return $Results
+        } -ArgumentList ($Apps) -ErrorAction Stop | ForEach-Object {
+            Add-Content -Path $LogFile -Value "$ComputerName - $_"
+        }
+
+        Add-Content -Path $LogFile -Value "COMPLETED: $ComputerName`n"
+        Write-Host "✔ $ComputerName processed successfully." -ForegroundColor Green
+        return $true
     }
     catch {
-        Write-Warning "Failed to connect to $Machine: $_"
+        $errMsg = "❌ Failed on $ComputerName - $($_.Exception.Message)"
+        Write-Host $errMsg -ForegroundColor Red
+        Add-Content -Path $LogFile -Value $errMsg
+        return $false
     }
+}
+
+# Main logic
+if (Test-Path $MachineList) {
+    $Computers = Get-Content $MachineList | Where-Object { $_ -and $_ -notmatch '^#' }
+
+    foreach ($Computer in $Computers) {
+        $Attempt = 1
+        $Success = $false
+
+        while (-not $Success -and $Attempt -le $MaxRetries) {
+            Write-Host "`nAttempt $Attempt of $MaxRetries for $Computer..." -ForegroundColor Yellow
+            $Success = Remove-AppsRemote -ComputerName $Computer -Apps $Apps
+
+            if (-not $Success -and $Attempt -lt $MaxRetries) {
+                Write-Host "Retrying $Computer in $RetryDelaySeconds seconds..." -ForegroundColor DarkYellow
+                Start-Sleep -Seconds $RetryDelaySeconds
+            }
+
+            $Attempt++
+        }
+
+        if (-not $Success) {
+            $msg = "⚠️  $Computer failed after $MaxRetries attempts."
+            Write-Host $msg -ForegroundColor Red
+            Add-Content -Path $LogFile -Value $msg
+        }
+    }
+
+    Write-Host "`nAll processing complete. Log saved to:`n$LogFile" -ForegroundColor Yellow
+} else {
+    Write-Error "machines.txt not found in current directory."
 }
