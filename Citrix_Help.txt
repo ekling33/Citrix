@@ -1,33 +1,31 @@
 # ====================================================================
 # Script: Remove-Extensions-Remote.ps1
 # Purpose: Remove specific Microsoft Store apps from multiple PCs
-# Author: Eric’s cleanup script
+# Author: Eric’s cleanup script (fixed version)
 # ====================================================================
 
-# File containing list of target machines (one per line)
 $MachineList = "machines.txt"
-
-# Apps to remove
 $Apps = @(
     "Microsoft.Microsoft3DViewer",
     "Microsoft.WebMediaExtensions",
     "Microsoft.VP9VideoExtensions"
 )
 
-# Log file (timestamped)
 $Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $LogFile = "$env:USERPROFILE\Desktop\AppxCleanupLog_$Timestamp.txt"
 
-# Max retries for offline/unreachable machines
 $MaxRetries = 3
 $RetryDelaySeconds = 30
 
-# Function to remove apps on a remote machine
+# --- Helper function to test if a host is reachable ---
+function Test-HostOnline {
+    param([string]$ComputerName)
+    return Test-Connection -ComputerName $ComputerName -Count 1 -Quiet -ErrorAction SilentlyContinue
+}
+
+# --- Main cleanup function ---
 function Remove-AppsRemote {
-    param (
-        [string]$ComputerName,
-        [array]$Apps
-    )
+    param ([string]$ComputerName, [array]$Apps)
 
     Write-Host "`n=== Processing $ComputerName ===" -ForegroundColor Cyan
     Add-Content -Path $LogFile -Value "`n=== $ComputerName ==="
@@ -35,33 +33,35 @@ function Remove-AppsRemote {
     try {
         Invoke-Command -ComputerName $ComputerName -ScriptBlock {
             param($Apps)
-
             $Results = @()
 
             foreach ($app in $Apps) {
-                $Status = "Unknown"
                 try {
-                    # Remove Appx packages for all users
-                    Get-AppxPackage -AllUsers -Name $app -ErrorAction SilentlyContinue | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
-
-                    # Remove provisioned (future users)
-                    Get-AppxProvisionedPackage -Online | Where-Object {$_.DisplayName -eq $app} | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
-
-                    # Verify removal
-                    $Check = Get-AppxPackage -AllUsers -Name $app -ErrorAction SilentlyContinue
-                    if ($Check) {
-                        $Status = "FAILED (still detected)"
-                    } else {
-                        $Status = "SUCCESS"
+                    $pkg = Get-AppxPackage -Name $app -ErrorAction SilentlyContinue
+                    if ($pkg) {
+                        Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction SilentlyContinue
                     }
-                } catch {
-                    $Status = "ERROR: $($_.Exception.Message)"
-                }
-                $Results += "$app : $Status"
-            }
 
+                    # Provisioned package removal (future users)
+                    $prov = Get-AppxProvisionedPackage -Online | Where-Object {$_.DisplayName -eq $app}
+                    if ($prov) {
+                        Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorAction SilentlyContinue
+                    }
+
+                    # Verify
+                    $check = Get-AppxPackage -Name $app -ErrorAction SilentlyContinue
+                    if ($check) {
+                        $Results += "$app : FAILED (still detected)"
+                    } else {
+                        $Results += "$app : SUCCESS"
+                    }
+                }
+                catch {
+                    $Results += "$app : ERROR - $($_.Exception.Message)"
+                }
+            }
             return $Results
-        } -ArgumentList ($Apps) -ErrorAction Stop | ForEach-Object {
+        } -ArgumentList $Apps -ErrorAction Stop | ForEach-Object {
             Add-Content -Path $LogFile -Value "$ComputerName - $_"
         }
 
@@ -70,14 +70,14 @@ function Remove-AppsRemote {
         return $true
     }
     catch {
-        $errMsg = "❌ Failed on $ComputerName - $($_.Exception.Message)"
-        Write-Host $errMsg -ForegroundColor Red
-        Add-Content -Path $LogFile -Value $errMsg
+        $err = "❌ Failed on $ComputerName - $($_.Exception.Message)"
+        Write-Host $err -ForegroundColor Red
+        Add-Content -Path $LogFile -Value $err
         return $false
     }
 }
 
-# Main logic
+# --- Main Execution Loop ---
 if (Test-Path $MachineList) {
     $Computers = Get-Content $MachineList | Where-Object { $_ -and $_ -notmatch '^#' }
 
@@ -87,6 +87,16 @@ if (Test-Path $MachineList) {
 
         while (-not $Success -and $Attempt -le $MaxRetries) {
             Write-Host "`nAttempt $Attempt of $MaxRetries for $Computer..." -ForegroundColor Yellow
+
+            if (-not (Test-HostOnline -ComputerName $Computer)) {
+                $msg = "⚠️  $Computer is offline or unreachable (skipping attempt $Attempt)."
+                Write-Host $msg -ForegroundColor DarkYellow
+                Add-Content -Path $LogFile -Value $msg
+                Start-Sleep -Seconds $RetryDelaySeconds
+                $Attempt++
+                continue
+            }
+
             $Success = Remove-AppsRemote -ComputerName $Computer -Apps $Apps
 
             if (-not $Success -and $Attempt -lt $MaxRetries) {
@@ -104,7 +114,7 @@ if (Test-Path $MachineList) {
         }
     }
 
-    Write-Host "`nAll processing complete. Log saved to:`n$LogFile" -ForegroundColor Yellow
+    Write-Host "`n✅ All processing complete. Log saved to:`n$LogFile" -ForegroundColor Green
 } else {
     Write-Error "machines.txt not found in current directory."
 }
