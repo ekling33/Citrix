@@ -1,10 +1,9 @@
 # ====================================================================
-# Script: Remove-Extensions-Local.ps1
-# Purpose: Remove 3D Viewer, VP9, WebMediaExtensions locally for all users
-#          then verify removal and log results
+# Script: Remove-Extensions-AllUsers.ps1
+# Purpose: Remove 3DViewer, VP9, and WebMediaExtensions from every
+#          local user profile (cleans stale user AppX registrations)
 # ====================================================================
 
-# --- Configuration ---
 $Apps = @(
     "Microsoft.Microsoft3DViewer",
     "Microsoft.WebMediaExtensions",
@@ -12,58 +11,88 @@ $Apps = @(
 )
 
 $Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-$LogFile   = "$env:USERPROFILE\Desktop\AppxRemovalLog_$Timestamp.txt"
+$LogFile   = "$env:USERPROFILE\Desktop\AppxUserCleanup_$Timestamp.txt"
 
-Write-Host "=== Starting local Appx removal ===" -ForegroundColor Cyan
-Add-Content -Path $LogFile -Value "=== Local Appx Removal Log ($Timestamp) ===`n"
+Write-Host "=== Starting AppX cleanup for all local users ===" -ForegroundColor Cyan
+Add-Content -Path $LogFile -Value "=== AppX Per-User Cleanup Log ($Timestamp) ===`n"
 
-# --- Step 1: Remove apps for all local users ---
-foreach ($app in $Apps) {
-    Write-Host "`nRemoving $app for all users..." -ForegroundColor Yellow
-    Add-Content -Path $LogFile -Value "`n$app removal started..."
+# --- Gather user profiles ---
+$userProfiles = Get-CimInstance Win32_UserProfile | Where-Object {
+    $_.LocalPath -like "C:\Users\*" -and
+    -not ($_.LocalPath -match "Administrator|Default|Public|NetworkService|LocalService")
+}
+
+foreach ($profile in $userProfiles) {
+    $userPath = $profile.LocalPath
+    $sid      = $profile.SID
+
+    Write-Host "`nProcessing user profile: $userPath" -ForegroundColor Yellow
+    Add-Content -Path $LogFile -Value "`nUser: $userPath  SID: $sid"
 
     try {
-        # Remove per-user instances
-        Get-AppxPackage -AllUsers -Name $app -ErrorAction SilentlyContinue | ForEach-Object {
-            Remove-AppxPackage -Package $_.PackageFullName -ErrorAction SilentlyContinue
+        # Load user's registry hive if not loaded
+        if (-not (Test-Path "HKU\$sid")) {
+            reg load "HKU\$sid" "$userPath\NTUSER.DAT" | Out-Null
+            $hiveLoaded = $true
+        } else {
+            $hiveLoaded = $false
         }
 
-        # Remove provisioned image copy
-        Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq $app } | ForEach-Object {
-            Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName -ErrorAction SilentlyContinue
+        # Run cleanup for this user
+        $results = Invoke-Command -ScriptBlock {
+            param($Apps)
+            $r = @()
+            foreach ($app in $Apps) {
+                try {
+                    $pkg = Get-AppxPackage -Name $app -ErrorAction SilentlyContinue
+                    if ($pkg) {
+                        Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction SilentlyContinue
+                        $r += "$app : Removed"
+                    } else {
+                        $r += "$app : Not Found"
+                    }
+                } catch {
+                    $r += "$app : ERROR - $($_.Exception.Message)"
+                }
+            }
+            return $r
+        } -ArgumentList ($Apps) -ErrorAction SilentlyContinue
+
+        foreach ($line in $results) {
+            Add-Content -Path $LogFile -Value "  $line"
+            if ($line -match "Removed") {
+                Write-Host "  $line" -ForegroundColor Green
+            } else {
+                Write-Host "  $line" -ForegroundColor DarkGray
+            }
         }
 
-        Add-Content -Path $LogFile -Value "Removal commands issued for $app."
-    }
-    catch {
-        $err = "Error removing $app: $($_.Exception.Message)"
+    } catch {
+        $err = "Error processing $userPath : $($_.Exception.Message)"
         Write-Host $err -ForegroundColor Red
         Add-Content -Path $LogFile -Value $err
     }
+    finally {
+        # Unload hive if we loaded it
+        if ($hiveLoaded) {
+            reg unload "HKU\$sid" | Out-Null
+        }
+    }
 }
 
-# --- Step 2: Verification ---
-Write-Host "`n=== Verifying removal... ===" -ForegroundColor Cyan
-Add-Content -Path $LogFile -Value "`n=== Verification Results ==="
+# --- Verification ---
+Write-Host "`n=== Verification Pass ===" -ForegroundColor Cyan
+Add-Content -Path $LogFile -Value "`n=== Verification ==="
 
 foreach ($app in $Apps) {
-    $userPkg  = Get-AppxPackage -AllUsers -Name $app -ErrorAction SilentlyContinue
-    $provPkg  = Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq $app }
-    $diskPath = Get-ChildItem "C:\Program Files\WindowsApps" -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -match [regex]::Escape($app) }
-
-    if (-not $userPkg -and -not $provPkg -and -not $diskPath) {
-        $msg = "✅ $app : Fully removed"
+    $userPkg = Get-AppxPackage -AllUsers -Name $app -ErrorAction SilentlyContinue
+    if ($userPkg) {
+        $msg = "⚠️  $app : Still detected for some users"
+        Write-Host $msg -ForegroundColor Yellow
+    } else {
+        $msg = "✅ $app : Fully removed from all profiles"
         Write-Host $msg -ForegroundColor Green
     }
-    else {
-        $msg = "⚠️  $app : Still detected"
-        if ($userPkg) { $msg += " (user package)" }
-        if ($provPkg) { $msg += " (provisioned)" }
-        if ($diskPath) { $msg += " (disk folder)" }
-        Write-Host $msg -ForegroundColor Yellow
-    }
-
     Add-Content -Path $LogFile -Value $msg
 }
 
