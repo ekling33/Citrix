@@ -1,7 +1,7 @@
 # ====================================================================
 # Script: Remove-Extensions-Remote.ps1
-# Purpose: Remove specific Microsoft Store apps from multiple PCs
-# Author: Eric’s cleanup script (fixed version)
+# Purpose: Remove Microsoft Store apps remotely with DISM fallback
+# Author: Eric’s cleanup script (final version)
 # ====================================================================
 
 $MachineList = "machines.txt"
@@ -17,7 +17,7 @@ $LogFile = "$env:USERPROFILE\Desktop\AppxCleanupLog_$Timestamp.txt"
 $MaxRetries = 3
 $RetryDelaySeconds = 30
 
-# --- Helper function to test if a host is reachable ---
+# --- Helper function: check online status ---
 function Test-HostOnline {
     param([string]$ComputerName)
     return Test-Connection -ComputerName $ComputerName -Count 1 -Quiet -ErrorAction SilentlyContinue
@@ -33,32 +33,46 @@ function Remove-AppsRemote {
     try {
         Invoke-Command -ComputerName $ComputerName -ScriptBlock {
             param($Apps)
+
             $Results = @()
 
             foreach ($app in $Apps) {
                 try {
+                    $Status = "Unknown"
+
+                    # Remove for current user
                     $pkg = Get-AppxPackage -Name $app -ErrorAction SilentlyContinue
                     if ($pkg) {
                         Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction SilentlyContinue
                     }
 
-                    # Provisioned package removal (future users)
+                    # Remove from provisioning
                     $prov = Get-AppxProvisionedPackage -Online | Where-Object {$_.DisplayName -eq $app}
                     if ($prov) {
                         Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorAction SilentlyContinue
                     }
 
-                    # Verify
+                    # Verify if still present
                     $check = Get-AppxPackage -Name $app -ErrorAction SilentlyContinue
                     if ($check) {
-                        $Results += "$app : FAILED (still detected)"
+                        # Attempt DISM fallback if app still detected
+                        $dismName = "$app" + "_8wekyb3d8bbwe"
+                        Write-Output "[$app] App still detected. Attempting DISM removal..."
+                        $dismOutput = dism /Online /Remove-ProvisionedAppxPackage /PackageName:$dismName 2>&1
+                        if ($LASTEXITCODE -eq 0) {
+                            $Status = "SUCCESS (removed via DISM)"
+                        } else {
+                            $Status = "FAILED after DISM"
+                            Write-Output $dismOutput
+                        }
                     } else {
-                        $Results += "$app : SUCCESS"
+                        $Status = "SUCCESS"
                     }
                 }
                 catch {
-                    $Results += "$app : ERROR - $($_.Exception.Message)"
+                    $Status = "ERROR - $($_.Exception.Message)"
                 }
+                $Results += "$app : $Status"
             }
             return $Results
         } -ArgumentList $Apps -ErrorAction Stop | ForEach-Object {
