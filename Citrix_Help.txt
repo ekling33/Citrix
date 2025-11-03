@@ -1,12 +1,70 @@
-Get-AppxPackage -AllUsers | Where-Object { $_.Name -match "3DViewer|WebMedia|VP9" } | Select Name, PackageFullName
-Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -match "3DViewer|WebMedia|VP9" } | Select DisplayName, PackageName
+# ====================================================================
+# Script: Remove-Extensions-Local.ps1
+# Purpose: Remove 3D Viewer, VP9, WebMediaExtensions locally for all users
+#          then verify removal and log results
+# ====================================================================
 
-########
+# --- Configuration ---
+$Apps = @(
+    "Microsoft.Microsoft3DViewer",
+    "Microsoft.WebMediaExtensions",
+    "Microsoft.VP9VideoExtensions"
+)
 
-$apps = "Microsoft.Microsoft3DViewer","Microsoft.WebMediaExtensions","Microsoft.VP9VideoExtensions"
-foreach ($app in $apps) {
-    Get-AppxPackage -AllUsers -Name $app |
-        ForEach-Object { Remove-AppxPackage -Package $_.PackageFullName -AllUsers -ErrorAction SilentlyContinue }
+$Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$LogFile   = "$env:USERPROFILE\Desktop\AppxRemovalLog_$Timestamp.txt"
+
+Write-Host "=== Starting local Appx removal ===" -ForegroundColor Cyan
+Add-Content -Path $LogFile -Value "=== Local Appx Removal Log ($Timestamp) ===`n"
+
+# --- Step 1: Remove apps for all local users ---
+foreach ($app in $Apps) {
+    Write-Host "`nRemoving $app for all users..." -ForegroundColor Yellow
+    Add-Content -Path $LogFile -Value "`n$app removal started..."
+
+    try {
+        # Remove per-user instances
+        Get-AppxPackage -AllUsers -Name $app -ErrorAction SilentlyContinue | ForEach-Object {
+            Remove-AppxPackage -Package $_.PackageFullName -ErrorAction SilentlyContinue
+        }
+
+        # Remove provisioned image copy
+        Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq $app } | ForEach-Object {
+            Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName -ErrorAction SilentlyContinue
+        }
+
+        Add-Content -Path $LogFile -Value "Removal commands issued for $app."
+    }
+    catch {
+        $err = "Error removing $app: $($_.Exception.Message)"
+        Write-Host $err -ForegroundColor Red
+        Add-Content -Path $LogFile -Value $err
+    }
 }
 
-Get-AppxPackage -AllUsers | Where-Object { $_.Name -match "3DViewer|VP9|WebMedia" }
+# --- Step 2: Verification ---
+Write-Host "`n=== Verifying removal... ===" -ForegroundColor Cyan
+Add-Content -Path $LogFile -Value "`n=== Verification Results ==="
+
+foreach ($app in $Apps) {
+    $userPkg  = Get-AppxPackage -AllUsers -Name $app -ErrorAction SilentlyContinue
+    $provPkg  = Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq $app }
+    $diskPath = Get-ChildItem "C:\Program Files\WindowsApps" -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match [regex]::Escape($app) }
+
+    if (-not $userPkg -and -not $provPkg -and -not $diskPath) {
+        $msg = "✅ $app : Fully removed"
+        Write-Host $msg -ForegroundColor Green
+    }
+    else {
+        $msg = "⚠️  $app : Still detected"
+        if ($userPkg) { $msg += " (user package)" }
+        if ($provPkg) { $msg += " (provisioned)" }
+        if ($diskPath) { $msg += " (disk folder)" }
+        Write-Host $msg -ForegroundColor Yellow
+    }
+
+    Add-Content -Path $LogFile -Value $msg
+}
+
+Write-Host "`n=== Completed. Log saved to: $LogFile ===" -ForegroundColor Cyan
