@@ -1,7 +1,7 @@
 # ====================================================================
 # Script: Remove-Extensions-Remote.ps1
-# Purpose: Remove Microsoft Store apps remotely with fully dynamic DISM fallback
-# Author: Eric’s cleanup script (verified version)
+# Purpose: Remove Microsoft Store apps remotely with robust DISM fallback
+# Author: Eric’s cleanup script (syntax-corrected final)
 # ====================================================================
 
 $MachineList = "machines.txt"
@@ -23,7 +23,10 @@ function Test-HostOnline {
 }
 
 function Remove-AppsRemote {
-    param ([string]$ComputerName, [array]$Apps)
+    param (
+        [string]$ComputerName,
+        [array]$Apps
+    )
 
     Write-Host "`n=== Processing $ComputerName ===" -ForegroundColor Cyan
     Add-Content -Path $LogFile -Value "`n=== $ComputerName ==="
@@ -44,8 +47,8 @@ function Remove-AppsRemote {
                         Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction SilentlyContinue
                     }
 
-                    # Remove provisioned instance
-                    $prov = Get-AppxProvisionedPackage -Online | Where-Object {$_.DisplayName -eq $app}
+                    # Remove provisioned (future installs)
+                    $prov = Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq $app }
                     if ($prov) {
                         Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorAction SilentlyContinue
                     }
@@ -54,13 +57,15 @@ function Remove-AppsRemote {
                     $check = Get-AppxPackage -Name $app -ErrorAction SilentlyContinue
                     if ($check) {
                         # --- DISM fallback ---
-                        Write-Output "[$app] Still detected, running DISM package query..."
+                        Write-Output "[$app] Still detected, attempting DISM removal..."
 
                         $dismOutput = dism /Online /Get-ProvisionedAppxPackages 2>&1
-                        $packageName = ($dismOutput | Where-Object {$_ -match "^PackageName"} | Where-Object {$_ -match $app}) -replace "PackageName : ", ""
+                        $packageLine = $dismOutput | Where-Object { $_ -match "^PackageName" -and $_ -match [regex]::Escape($app) }
 
-                        if ($packageName) {
+                        if ($packageLine) {
+                            $packageName = ($packageLine -replace '^PackageName\s*:\s*', '').Trim()
                             Write-Output "Found package name: $packageName"
+
                             $dismResult = dism /Online /Remove-ProvisionedAppxPackage /PackageName:$packageName 2>&1
                             if ($LASTEXITCODE -eq 0) {
                                 $Status = "SUCCESS (removed via DISM)"
@@ -99,5 +104,44 @@ function Remove-AppsRemote {
     }
 }
 
+# --- Main Execution ---
 if (Test-Path $MachineList) {
-    $Computers = Get-Content $MachineList | Where-Object {
+    $Computers = Get-Content $MachineList | Where-Object { $_ -and $_ -notmatch '^#' }
+
+    foreach ($Computer in $Computers) {
+        $Attempt = 1
+        $Success = $false
+
+        while (-not $Success -and $Attempt -le $MaxRetries) {
+            Write-Host "`nAttempt $Attempt of $MaxRetries for $Computer..." -ForegroundColor Yellow
+
+            if (-not (Test-HostOnline -ComputerName $Computer)) {
+                $msg = "⚠️  $Computer is offline or unreachable (skipping attempt $Attempt)."
+                Write-Host $msg -ForegroundColor DarkYellow
+                Add-Content -Path $LogFile -Value $msg
+                Start-Sleep -Seconds $RetryDelaySeconds
+                $Attempt++
+                continue
+            }
+
+            $Success = Remove-AppsRemote -ComputerName $Computer -Apps $Apps
+
+            if (-not $Success -and $Attempt -lt $MaxRetries) {
+                Write-Host "Retrying $Computer in $RetryDelaySeconds seconds..." -ForegroundColor DarkYellow
+                Start-Sleep -Seconds $RetryDelaySeconds
+            }
+
+            $Attempt++
+        }
+
+        if (-not $Success) {
+            $msg = "⚠️  $Computer failed after $MaxRetries attempts."
+            Write-Host $msg -ForegroundColor Red
+            Add-Content -Path $LogFile -Value $msg
+        }
+    }
+
+    Write-Host "`n✅ All processing complete. Log saved to:`n$LogFile" -ForegroundColor Green
+} else {
+    Write-Error "machines.txt not found in current directory."
+}
