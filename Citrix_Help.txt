@@ -1,6 +1,6 @@
 # ====================================================================
 # Script: Remove-Extensions-Remote.ps1
-# Purpose: Remove Microsoft Store apps remotely with DISM fallback
+# Purpose: Remove Microsoft Store apps remotely with dynamic DISM fallback
 # Author: Eric’s cleanup script (final version)
 # ====================================================================
 
@@ -17,13 +17,13 @@ $LogFile = "$env:USERPROFILE\Desktop\AppxCleanupLog_$Timestamp.txt"
 $MaxRetries = 3
 $RetryDelaySeconds = 30
 
-# --- Helper function: check online status ---
+# --- Helper: Ping before connecting ---
 function Test-HostOnline {
     param([string]$ComputerName)
     return Test-Connection -ComputerName $ComputerName -Count 1 -Quiet -ErrorAction SilentlyContinue
 }
 
-# --- Main cleanup function ---
+# --- Core cleanup function ---
 function Remove-AppsRemote {
     param ([string]$ComputerName, [array]$Apps)
 
@@ -40,30 +40,37 @@ function Remove-AppsRemote {
                 try {
                     $Status = "Unknown"
 
-                    # Remove for current user
+                    # Remove per-user instance
                     $pkg = Get-AppxPackage -Name $app -ErrorAction SilentlyContinue
                     if ($pkg) {
                         Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction SilentlyContinue
                     }
 
-                    # Remove from provisioning
+                    # Remove provisioned (future installs)
                     $prov = Get-AppxProvisionedPackage -Online | Where-Object {$_.DisplayName -eq $app}
                     if ($prov) {
                         Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorAction SilentlyContinue
                     }
 
-                    # Verify if still present
+                    # Verify removal
                     $check = Get-AppxPackage -Name $app -ErrorAction SilentlyContinue
                     if ($check) {
-                        # Attempt DISM fallback if app still detected
-                        $dismName = "$app" + "_8wekyb3d8bbwe"
-                        Write-Output "[$app] App still detected. Attempting DISM removal..."
-                        $dismOutput = dism /Online /Remove-ProvisionedAppxPackage /PackageName:$dismName 2>&1
-                        if ($LASTEXITCODE -eq 0) {
-                            $Status = "SUCCESS (removed via DISM)"
+                        # --- DISM fallback ---
+                        Write-Output "[$app] Still detected, attempting DISM removal..."
+                        $dismList = dism /Online /Get-ProvisionedAppxPackages | Select-String -Pattern $app -Context 0,1
+                        $packageName = ($dismList | Where-Object { $_ -match "PackageName" }) -replace ".*PackageName : ", ""
+
+                        if ($packageName) {
+                            Write-Output "Found package name: $packageName"
+                            $dismOutput = dism /Online /Remove-ProvisionedAppxPackage /PackageName:$packageName 2>&1
+                            if ($LASTEXITCODE -eq 0) {
+                                $Status = "SUCCESS (removed via DISM)"
+                            } else {
+                                $errText = ($dismOutput | Select-String -Pattern 'Error').Line
+                                $Status = "FAILED after DISM ($errText)"
+                            }
                         } else {
-                            $Status = "FAILED after DISM"
-                            Write-Output $dismOutput
+                            $Status = "FAILED - DISM package not found"
                         }
                     } else {
                         $Status = "SUCCESS"
@@ -72,8 +79,10 @@ function Remove-AppsRemote {
                 catch {
                     $Status = "ERROR - $($_.Exception.Message)"
                 }
+
                 $Results += "$app : $Status"
             }
+
             return $Results
         } -ArgumentList $Apps -ErrorAction Stop | ForEach-Object {
             Add-Content -Path $LogFile -Value "$ComputerName - $_"
@@ -91,7 +100,7 @@ function Remove-AppsRemote {
     }
 }
 
-# --- Main Execution Loop ---
+# --- Main Execution ---
 if (Test-Path $MachineList) {
     $Computers = Get-Content $MachineList | Where-Object { $_ -and $_ -notmatch '^#' }
 
