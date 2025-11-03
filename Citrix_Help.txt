@@ -1,7 +1,7 @@
 # ====================================================================
 # Script: Remove-Extensions-Remote.ps1
-# Purpose: Remove Microsoft Store apps remotely with dynamic DISM fallback
-# Author: Eric’s cleanup script (final version)
+# Purpose: Remove Microsoft Store apps remotely with fully dynamic DISM fallback
+# Author: Eric’s cleanup script (verified version)
 # ====================================================================
 
 $MachineList = "machines.txt"
@@ -17,13 +17,11 @@ $LogFile = "$env:USERPROFILE\Desktop\AppxCleanupLog_$Timestamp.txt"
 $MaxRetries = 3
 $RetryDelaySeconds = 30
 
-# --- Helper: Ping before connecting ---
 function Test-HostOnline {
     param([string]$ComputerName)
     return Test-Connection -ComputerName $ComputerName -Count 1 -Quiet -ErrorAction SilentlyContinue
 }
 
-# --- Core cleanup function ---
 function Remove-AppsRemote {
     param ([string]$ComputerName, [array]$Apps)
 
@@ -40,34 +38,35 @@ function Remove-AppsRemote {
                 try {
                     $Status = "Unknown"
 
-                    # Remove per-user instance
+                    # Remove per-user install
                     $pkg = Get-AppxPackage -Name $app -ErrorAction SilentlyContinue
                     if ($pkg) {
                         Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction SilentlyContinue
                     }
 
-                    # Remove provisioned (future installs)
+                    # Remove provisioned instance
                     $prov = Get-AppxProvisionedPackage -Online | Where-Object {$_.DisplayName -eq $app}
                     if ($prov) {
                         Remove-AppxProvisionedPackage -Online -PackageName $prov.PackageName -ErrorAction SilentlyContinue
                     }
 
-                    # Verify removal
+                    # Verify
                     $check = Get-AppxPackage -Name $app -ErrorAction SilentlyContinue
                     if ($check) {
                         # --- DISM fallback ---
-                        Write-Output "[$app] Still detected, attempting DISM removal..."
-                        $dismList = dism /Online /Get-ProvisionedAppxPackages | Select-String -Pattern $app -Context 0,1
-                        $packageName = ($dismList | Where-Object { $_ -match "PackageName" }) -replace ".*PackageName : ", ""
+                        Write-Output "[$app] Still detected, running DISM package query..."
+
+                        $dismOutput = dism /Online /Get-ProvisionedAppxPackages 2>&1
+                        $packageName = ($dismOutput | Where-Object {$_ -match "^PackageName"} | Where-Object {$_ -match $app}) -replace "PackageName : ", ""
 
                         if ($packageName) {
                             Write-Output "Found package name: $packageName"
-                            $dismOutput = dism /Online /Remove-ProvisionedAppxPackage /PackageName:$packageName 2>&1
+                            $dismResult = dism /Online /Remove-ProvisionedAppxPackage /PackageName:$packageName 2>&1
                             if ($LASTEXITCODE -eq 0) {
                                 $Status = "SUCCESS (removed via DISM)"
                             } else {
-                                $errText = ($dismOutput | Select-String -Pattern 'Error').Line
-                                $Status = "FAILED after DISM ($errText)"
+                                $errLine = ($dismResult | Select-String -Pattern 'Error' | Select-Object -First 1).Line
+                                $Status = "FAILED after DISM ($errLine)"
                             }
                         } else {
                             $Status = "FAILED - DISM package not found"
@@ -100,44 +99,5 @@ function Remove-AppsRemote {
     }
 }
 
-# --- Main Execution ---
 if (Test-Path $MachineList) {
-    $Computers = Get-Content $MachineList | Where-Object { $_ -and $_ -notmatch '^#' }
-
-    foreach ($Computer in $Computers) {
-        $Attempt = 1
-        $Success = $false
-
-        while (-not $Success -and $Attempt -le $MaxRetries) {
-            Write-Host "`nAttempt $Attempt of $MaxRetries for $Computer..." -ForegroundColor Yellow
-
-            if (-not (Test-HostOnline -ComputerName $Computer)) {
-                $msg = "⚠️  $Computer is offline or unreachable (skipping attempt $Attempt)."
-                Write-Host $msg -ForegroundColor DarkYellow
-                Add-Content -Path $LogFile -Value $msg
-                Start-Sleep -Seconds $RetryDelaySeconds
-                $Attempt++
-                continue
-            }
-
-            $Success = Remove-AppsRemote -ComputerName $Computer -Apps $Apps
-
-            if (-not $Success -and $Attempt -lt $MaxRetries) {
-                Write-Host "Retrying $Computer in $RetryDelaySeconds seconds..." -ForegroundColor DarkYellow
-                Start-Sleep -Seconds $RetryDelaySeconds
-            }
-
-            $Attempt++
-        }
-
-        if (-not $Success) {
-            $msg = "⚠️  $Computer failed after $MaxRetries attempts."
-            Write-Host $msg -ForegroundColor Red
-            Add-Content -Path $LogFile -Value $msg
-        }
-    }
-
-    Write-Host "`n✅ All processing complete. Log saved to:`n$LogFile" -ForegroundColor Green
-} else {
-    Write-Error "machines.txt not found in current directory."
-}
+    $Computers = Get-Content $MachineList | Where-Object {
