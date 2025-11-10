@@ -1,58 +1,96 @@
-Invoke-Command -ComputerName $VM -ScriptBlock {
-    param($ProxyAddress)
+# ================================
+#   Proxy Deployment Script
+#   Applies proxy settings to:
+#     - WinHTTP (machine-wide)
+#     - All user profiles (via NTUSER.DAT)
+#     - Current logged-in user
+# ================================
 
-    ########################################
-    # Ensure HKU: drive exists for registry work
-    ########################################
-    if (-not (Get-PSDrive -Name HKU -ErrorAction SilentlyContinue)) {
-        New-PSDrive -Name HKU -PSProvider Registry -Root HKEY_USERS | Out-Null
+# Path to the VM list
+$VMListPath = ".\machines.txt"
+$VMs = Get-Content -Path $VMListPath
+
+# Proxy address
+$ProxyAddress = "proxy.mywebsite.com:8080"
+
+foreach ($VM in $VMs) {
+    Write-Host "Configuring proxy on $VM ..." -ForegroundColor Cyan
+
+    try {
+        Invoke-Command -ComputerName $VM -ScriptBlock {
+            param($ProxyAddress)
+
+            ########################################
+            # Ensure HKU: drive exists
+            ########################################
+            if (-not (Get-PSDrive -Name HKU -ErrorAction SilentlyContinue)) {
+                New-PSDrive -Name HKU -PSProvider Registry -Root HKEY_USERS | Out-Null
+            }
+
+            ########################################
+            # 1. Set WinHTTP Proxy (Machine-Wide)
+            ########################################
+            Write-Output "Setting WinHTTP proxy..."
+            netsh winhttp set proxy $ProxyAddress | Out-Null
+
+            ########################################
+            # 2. Apply proxy to ALL user profiles
+            ########################################
+            $UserProfileBase = "C:\Users"
+            Write-Output "Updating all user profiles under $UserProfileBase ..."
+
+            Get-ChildItem $UserProfileBase -Directory | ForEach-Object {
+                $ProfilePath = $_.FullName
+                $NtUserDat  = Join-Path $ProfilePath "NTUSER.DAT"
+
+                # Skip system profiles
+                if ($_.Name -in "All Users","Default","Default User","Public","Administrator") {
+                    return
+                }
+
+                if (Test-Path $NtUserDat) {
+                    Write-Output "Loading registry hive for profile: $($_.Name)"
+
+                    # Load user hive
+                    reg load "HKU\TempHive" "$NtUserDat" | Out-Null
+
+                    $RegPath = "HKU:\TempHive\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+
+                    # Apply manual proxy settings
+                    Set-ItemProperty -Path $RegPath -Name AutoDetect -Value 0 -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $RegPath -Name AutoConfigURL -Value "" -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $RegPath -Name ProxyEnable -Value 1
+                    Set-ItemProperty -Path $RegPath -Name ProxyServer -Value $ProxyAddress
+
+                    # Unload hive
+                    reg unload "HKU\TempHive" | Out-Null
+                }
+            }
+
+            ########################################
+            # 3. Update proxy for currently logged-in user (HKCU)
+            ########################################
+            Write-Output "Updating current logged-in user registry (HKCU)..."
+
+            $RegPathHKCU = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+
+            Set-ItemProperty -Path $RegPathHKCU -Name ProxyEnable -Value 1 -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $RegPathHKCU -Name ProxyServer -Value $ProxyAddress -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $RegPathHKCU -Name AutoDetect -Value 0 -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $RegPathHKCU -Name AutoConfigURL -Value "" -ErrorAction SilentlyContinue
+
+            # Apply the settings immediately
+            RunDll32.exe inetcpl.cpl,ImportInternetSettings
+
+            Write-Output "Proxy settings applied successfully."
+
+        } -ArgumentList $ProxyAddress -ErrorAction Stop
+
+        Write-Host "✅ Proxy configured on $VM" -ForegroundColor Green
     }
-
-    ########################################
-    # 1. Set WinHTTP proxy (machine-wide)
-    ########################################
-    netsh winhttp set proxy $ProxyAddress
-
-    ########################################
-    # 2. Apply Manual Proxy to ALL User Profiles
-    ########################################
-    $UserProfileBase = "C:\Users"
-
-    Get-ChildItem $UserProfileBase -Directory | ForEach-Object {
-        $ProfilePath = $_.FullName
-        $NtUserDat  = Join-Path $ProfilePath "NTUSER.DAT"
-
-        if (Test-Path $NtUserDat) {
-            Write-Output "Loading hive for: $ProfilePath"
-
-            # Load the user's registry hive
-            reg load "HKU\TempHive" "$NtUserDat" | Out-Null
-
-            $RegPath = "HKU:\TempHive\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-
-            # Disable automatic settings
-            Set-ItemProperty -Path $RegPath -Name AutoDetect -Value 0 -ErrorAction SilentlyContinue
-            Set-ItemProperty -Path $RegPath -Name AutoConfigURL -Value "" -ErrorAction SilentlyContinue
-
-            # Enable manual proxy
-            Set-ItemProperty -Path $RegPath -Name ProxyEnable -Value 1
-            Set-ItemProperty -Path $RegPath -Name ProxyServer -Value $ProxyAddress
-
-            # Unload the hive
-            reg unload "HKU\TempHive" | Out-Null
-        }
+    catch {
+        Write-Host "❌ Failed configuring $VM: $_" -ForegroundColor Red
     }
+}
 
-    ########################################
-    # 3. Update proxy for currently logged-in user
-    ########################################
-    $RegPathHKCU = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-
-    Set-ItemProperty -Path $RegPathHKCU -Name ProxyEnable -Value 1 -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $RegPathHKCU -Name ProxyServer -Value $ProxyAddress -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $RegPathHKCU -Name AutoDetect -Value 0 -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path $RegPathHKCU -Name AutoConfigURL -Value "" -ErrorAction SilentlyContinue
-
-    RunDll32.exe inetcpl.cpl,ImportInternetSettings
-
-} -ArgumentList $ProxyAddress
+Write-Host "`nAll VM proxy updates complete." -ForegroundColor Yellow
