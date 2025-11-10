@@ -1,15 +1,16 @@
 # Set-DamewareRegistry.ps1
-# Applies DameWare registry settings to all machines listed in machines.txt
+# Applies updated DameWare registry settings to all machines listed in machines.txt
+# Now includes automatic DWMRCS service restart
 
 # Path to the list of VMs
 $ComputerListFile = ".\machines.txt"
 
 if (!(Test-Path $ComputerListFile)) {
-    Write-Host "ERROR: machines.txt not found in script directory." -ForegroundColor Red
+    Write-Host "ERROR: machines.txt not found." -ForegroundColor Red
     exit
 }
 
-# Read computer names
+# Get machine names
 $ComputerNames = Get-Content $ComputerListFile | Where-Object { $_.Trim() -ne "" }
 
 if ($ComputerNames.Count -eq 0) {
@@ -17,33 +18,51 @@ if ($ComputerNames.Count -eq 0) {
     exit
 }
 
-# Registry path to apply
+# Registry path
 $RegPath = "HKLM:\SOFTWARE\DameWare Development\Mini Remote Control Service\Settings"
 
-# Script that runs on the remote machine
+# Script executed on remote machines
 $RemoteBlock = {
     param($RegPath)
 
     try {
-        # Create path if missing
+        # Ensure registry path exists
         if (-not (Test-Path $RegPath)) {
             New-Item -Path $RegPath -Force | Out-Null
         }
 
-        # Set values
+        # Apply updated registry values
         Set-ItemProperty -Path $RegPath -Name "Notify On New Connection" -Value 0 -Type DWord -Force
         Set-ItemProperty -Path $RegPath -Name "Permission Required for non Admin Force View Only" -Value 1 -Type DWord -Force
-        Set-ItemProperty -Path $RegPath -Name "Permission Required for non Admin" -Value 1 -Type DWord -Force
-        Set-ItemProperty -Path $RegPath -Name "Permission Required for non Admin Disconnect If At Logon Desktop" -Value 1 -Type DWord -Force
+        Set-ItemProperty -Path $RegPath -Name "Permission Required for non Admin" -Value 0 -Type DWord -Force
+        Set-ItemProperty -Path $RegPath -Name "Permission Required for non Admin Disconnect If At Logon Desktop" -Value 0 -Type DWord -Force
+        Set-ItemProperty -Path $RegPath -Name "Permission Required Also When Locked" -Value 0 -Type DWord -Force
 
-        return @{ Computer = $env:COMPUTERNAME; Result = "Success" }
+        # Restart DameWare service to apply settings immediately
+        try {
+            Restart-Service -Name "DWMRCS" -Force -ErrorAction Stop
+            $ServiceStatus = "DWMRCS service restarted"
+        }
+        catch {
+            $ServiceStatus = "DWMRCS service restart FAILED: $($_.Exception.Message)"
+        }
+
+        return @{
+            Computer = $env:COMPUTERNAME
+            Result = "Success"
+            Service = $ServiceStatus
+        }
     }
     catch {
-        return @{ Computer = $env:COMPUTERNAME; Result = "Error"; Error = $_.Exception.Message }
+        return @{
+            Computer = $env:COMPUTERNAME
+            Result = "Error"
+            Error = $_.Exception.Message
+        }
     }
 }
 
-Write-Host "Applying DameWare registry settings..." -ForegroundColor Cyan
+Write-Host "Applying DameWare registry settings and restarting service..." -ForegroundColor Cyan
 Write-Host "Targets: $($ComputerNames -join ', ')" -ForegroundColor DarkCyan
 Write-Host ""
 
@@ -59,12 +78,12 @@ foreach ($Computer in $ComputerNames) {
     }
 }
 
-# Summary
+# Summary section
 Write-Host "`n---- SUMMARY ----" -ForegroundColor Yellow
 
 foreach ($r in $Results) {
     if ($r.Result -eq "Success") {
-        Write-Host "[$($r.Computer)] OK" -ForegroundColor Green
+        Write-Host "[$($r.Computer)] OK - $($r.Service)" -ForegroundColor Green
     }
     else {
         Write-Host "[$($r.Computer)] ERROR: $($r.Error)" -ForegroundColor Red
