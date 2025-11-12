@@ -1,91 +1,78 @@
-# Set-DamewareRegistry.ps1
-# Applies updated DameWare registry settings to all machines listed in machines.txt
-# Now includes automatic DWMRCS service restart
+<#
+.SYNOPSIS
+Remotely forces Google Chrome and Microsoft Edge updates on Windows 10 VMs.
 
-# Path to the list of VMs
-$ComputerListFile = ".\machines.txt"
+.DESCRIPTION
+Reads machine names from machines.txt, connects via PowerShell remoting or WMI,
+and triggers GoogleUpdate and EdgeUpdate executables if found.
+Requires admin privileges and PowerShell remoting enabled on targets.
+#>
 
-if (!(Test-Path $ComputerListFile)) {
-    Write-Host "ERROR: machines.txt not found." -ForegroundColor Red
-    exit
+# --- CONFIGURATION ---
+$MachineList = Get-Content ".\machines.txt"
+$LogFile = ".\BrowserUpdateLog_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss")
+
+# --- FUNCTIONS ---
+function Write-Log {
+    param($Message)
+    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $Entry = "$Timestamp `t $Message"
+    Write-Host $Entry
+    Add-Content -Path $LogFile -Value $Entry
 }
 
-# Get machine names
-$ComputerNames = Get-Content $ComputerListFile | Where-Object { $_.Trim() -ne "" }
+function Invoke-RemoteUpdate {
+    param([string]$ComputerName)
 
-if ($ComputerNames.Count -eq 0) {
-    Write-Host "ERROR: machines.txt is empty." -ForegroundColor Red
-    exit
-}
+    Write-Log "==== $ComputerName ===="
 
-# Registry path
-$RegPath = "HKLM:\SOFTWARE\DameWare Development\Mini Remote Control Service\Settings"
-
-# Script executed on remote machines
-$RemoteBlock = {
-    param($RegPath)
+    # Test basic network connectivity
+    if (-not (Test-Connection -ComputerName $ComputerName -Count 1 -Quiet)) {
+        Write-Log "[$ComputerName] Unreachable."
+        return
+    }
 
     try {
-        # Ensure registry path exists
-        if (-not (Test-Path $RegPath)) {
-            New-Item -Path $RegPath -Force | Out-Null
+        # Force Group Policy update
+        Invoke-GPUpdate -Computer $ComputerName -RandomDelayInMinutes 0 -Force -ErrorAction Stop
+        Write-Log "[$ComputerName] Group Policy refreshed."
+
+        # Trigger Google Chrome update
+        $chromeUpdateCmd = "C:\Program Files (x86)\Google\Update\GoogleUpdate.exe"
+        $edgeUpdateCmd   = "C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe"
+
+        Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            $chromeUpdate = "C:\Program Files (x86)\Google\Update\GoogleUpdate.exe"
+            $edgeUpdate   = "C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe"
+
+            if (Test-Path $chromeUpdate) {
+                Start-Process -FilePath $chromeUpdate -ArgumentList "/ua /installsource scheduler" -Wait
+            }
+
+            if (Test-Path $edgeUpdate) {
+                Start-Process -FilePath $edgeUpdate -ArgumentList "/update MicrosoftEdge" -Wait
+            }
+
+            # Get current versions
+            $chromeVer = (Get-Item "C:\Program Files\Google\Chrome\Application\chrome.exe" -ErrorAction SilentlyContinue).VersionInfo.ProductVersion
+            $edgeVer   = (Get-Item "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" -ErrorAction SilentlyContinue).VersionInfo.ProductVersion
+
+            [PSCustomObject]@{
+                ChromeVersion = $chromeVer
+                EdgeVersion   = $edgeVer
+            }
+        } -ErrorAction Stop | ForEach-Object {
+            Write-Log "[$ComputerName] Chrome: $($_.ChromeVersion) | Edge: $($_.EdgeVersion)"
         }
 
-        # Apply updated registry values
-        Set-ItemProperty -Path $RegPath -Name "Notify On New Connection" -Value 0 -Type DWord -Force
-        Set-ItemProperty -Path $RegPath -Name "Permission Required for non Admin Force View Only" -Value 1 -Type DWord -Force
-        Set-ItemProperty -Path $RegPath -Name "Permission Required for non Admin" -Value 0 -Type DWord -Force
-        Set-ItemProperty -Path $RegPath -Name "Permission Required for non Admin Disconnect If At Logon Desktop" -Value 0 -Type DWord -Force
-        Set-ItemProperty -Path $RegPath -Name "Permission Required Also When Locked" -Value 0 -Type DWord -Force
-
-        # Restart DameWare service to apply settings immediately
-        try {
-            Restart-Service -Name "DWMRCS" -Force -ErrorAction Stop
-            $ServiceStatus = "DWMRCS service restarted"
-        }
-        catch {
-            $ServiceStatus = "DWMRCS service restart FAILED: $($_.Exception.Message)"
-        }
-
-        return @{
-            Computer = $env:COMPUTERNAME
-            Result = "Success"
-            Service = $ServiceStatus
-        }
-    }
-    catch {
-        return @{
-            Computer = $env:COMPUTERNAME
-            Result = "Error"
-            Error = $_.Exception.Message
-        }
+    } catch {
+        Write-Log "[$ComputerName] ERROR: $($_.Exception.Message)"
     }
 }
 
-Write-Host "Applying DameWare registry settings and restarting service..." -ForegroundColor Cyan
-Write-Host "Targets: $($ComputerNames -join ', ')" -ForegroundColor DarkCyan
-Write-Host ""
-
-$Results = @()
-
-foreach ($Computer in $ComputerNames) {
-    try {
-        $Output = Invoke-Command -ComputerName $Computer -ScriptBlock $RemoteBlock -ArgumentList $RegPath -ErrorAction Stop
-        $Results += $Output
-    }
-    catch {
-        $Results += @{ Computer = $Computer; Result = "Error"; Error = $_.Exception.Message }
-    }
+# --- MAIN LOOP ---
+Write-Log "Starting browser update run on $(($MachineList).Count) machines..."
+foreach ($Machine in $MachineList) {
+    Invoke-RemoteUpdate -ComputerName $Machine.Trim()
 }
-
-# Summary section
-Write-Host "`n---- SUMMARY ----" -ForegroundColor Yellow
-
-foreach ($r in $Results) {
-    if ($r.Result -eq "Success") {
-        Write-Host "[$($r.Computer)] OK - $($r.Service)" -ForegroundColor Green
-    }
-    else {
-        Write-Host "[$($r.Computer)] ERROR: $($r.Error)" -ForegroundColor Red
-    }
-}
+Write-Log "Update process complete."
