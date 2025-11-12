@@ -1,44 +1,19 @@
 <#
 .SYNOPSIS
 Remotely forces Google Chrome and Microsoft Edge updates on Windows 10 VMs.
-
-.DESCRIPTION
-Reads machine names from machines.txt, connects via PowerShell remoting,
-runs gpupdate /force remotely, triggers browser updaters,
-and logs results with progress and summary reporting.
 Compatible with Windows PowerShell 5.1.
 #>
 
-# --- CONFIGURATION ---
 $MachineList = Get-Content ".\machines.txt" | Where-Object { $_.Trim() -ne "" }
 $LogFile = ".\BrowserUpdateLog_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss")
 $Summary = @()
 
-# --- FUNCTIONS ---
 function Write-Log {
     param($Message)
     $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $Entry = "$Timestamp `t $Message"
     Write-Host $Entry
     Add-Content -Path $LogFile -Value $Entry
-}
-
-function Invoke-WithTimeout {
-    param(
-        [scriptblock]$ScriptBlock,
-        [int]$TimeoutSeconds = 300
-    )
-
-    $job = Start-Job -ScriptBlock $ScriptBlock
-    if (Wait-Job -Job $job -Timeout $TimeoutSeconds) {
-        $result = Receive-Job -Job $job -ErrorAction SilentlyContinue
-        Remove-Job $job -Force
-        return $result
-    } else {
-        Stop-Job $job -Force
-        Remove-Job $job -Force
-        throw "Operation timed out after $TimeoutSeconds seconds."
-    }
 }
 
 function Invoke-RemoteUpdate {
@@ -61,37 +36,30 @@ function Invoke-RemoteUpdate {
 
     try {
         Write-Log "[$ComputerName] Running gpupdate /force..."
-        Invoke-WithTimeout -TimeoutSeconds 180 -ScriptBlock {
-            Invoke-Command -ComputerName $using:ComputerName -ScriptBlock {
-                Start-Process "gpupdate.exe" -ArgumentList "/force" -Wait
-            }
+        Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            Start-Process "gpupdate.exe" -ArgumentList "/force" -Wait
         }
         Write-Log "[$ComputerName] Group Policy refreshed."
 
         Write-Log "[$ComputerName] Running Chrome and Edge updates..."
-        $Versions = Invoke-WithTimeout -TimeoutSeconds 300 -ScriptBlock {
-            Invoke-Command -ComputerName $using:ComputerName -ScriptBlock {
-                $results = [ordered]@{}
+        $Versions = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+            $results = [ordered]@{}
 
-                $chromeUpdate = "C:\Program Files (x86)\Google\Update\GoogleUpdate.exe"
-                $edgeUpdate   = "C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe"
+            $chromeUpdate = "C:\Program Files (x86)\Google\Update\GoogleUpdate.exe"
+            $edgeUpdate   = "C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe"
 
-                if (Test-Path $chromeUpdate) {
-                    Start-Process -FilePath $chromeUpdate -ArgumentList "/ua /installsource scheduler" -Wait
-                }
-                if (Test-Path $edgeUpdate) {
-                    Start-Process -FilePath $edgeUpdate -ArgumentList "/update MicrosoftEdge" -Wait
-                }
-
-                $chromeExe = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-                $edgeExe   = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-                $chromeVer = if (Test-Path $chromeExe) { (Get-Item $chromeExe).VersionInfo.ProductVersion } else { "Not Installed" }
-                $edgeVer   = if (Test-Path $edgeExe) { (Get-Item $edgeExe).VersionInfo.ProductVersion } else { "Not Installed" }
-
-                $results.ChromeVersion = $chromeVer
-                $results.EdgeVersion   = $edgeVer
-                return $results
+            if (Test-Path $chromeUpdate) {
+                Start-Process -FilePath $chromeUpdate -ArgumentList "/ua /installsource scheduler" -Wait
             }
+            if (Test-Path $edgeUpdate) {
+                Start-Process -FilePath $edgeUpdate -ArgumentList "/update MicrosoftEdge" -Wait
+            }
+
+            $chromeExe = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+            $edgeExe   = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+            $results.ChromeVersion = if (Test-Path $chromeExe) { (Get-Item $chromeExe).VersionInfo.ProductVersion } else { "Not Installed" }
+            $results.EdgeVersion   = if (Test-Path $edgeExe) { (Get-Item $edgeExe).VersionInfo.ProductVersion } else { "Not Installed" }
+            return $results
         }
 
         foreach ($v in $Versions) {
@@ -128,11 +96,9 @@ foreach ($Machine in $MachineList) {
 Write-Progress -Activity "Updating browsers on remote machines..." -Completed
 Write-Log "Update process complete."
 
-# --- SUMMARY REPORT ---
 Write-Host "`n===== SUMMARY REPORT =====" -ForegroundColor Cyan
 $Summary | Format-Table -AutoSize
 
-# Save summary as CSV too
 $CsvFile = $LogFile -replace '\.log$', '.csv'
 $Summary | Export-Csv -Path $CsvFile -NoTypeInformation
 Write-Host "`nSummary saved to: $CsvFile"
