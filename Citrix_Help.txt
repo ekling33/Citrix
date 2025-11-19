@@ -1,104 +1,58 @@
-<#
-.SYNOPSIS
-Remotely forces Google Chrome and Microsoft Edge updates on Windows 10 VMs.
-Compatible with Windows PowerShell 5.1.
-#>
+# Path to the machine list
+$MachineList = "machines.txt"
 
-$MachineList = Get-Content ".\machines.txt" | Where-Object { $_.Trim() -ne "" }
-$LogFile = ".\BrowserUpdateLog_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss")
-$Summary = @()
+# Output CSV
+$OutputFile = "BluePrismVersions.csv"
 
-function Write-Log {
-    param($Message)
-    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $Entry = "$Timestamp `t $Message"
-    Write-Host $Entry
-    Add-Content -Path $LogFile -Value $Entry
-}
+# Prepare results array
+$Results = @()
 
-function Invoke-RemoteUpdate {
-    param([string]$ComputerName)
+# Read machine names
+$Machines = Get-Content -Path $MachineList
 
-    $Result = [ordered]@{
-        ComputerName = $ComputerName
-        Status        = "Pending"
-        ChromeVersion = ""
-        EdgeVersion   = ""
-        Notes         = ""
-    }
-
-    if (-not (Test-Connection -ComputerName $ComputerName -Count 1 -Quiet)) {
-        Write-Log "[$ComputerName] Unreachable."
-        $Result.Status = "Unreachable"
-        $Summary += $Result
-        return
-    }
+foreach ($Machine in $Machines) {
+    Write-Host "Checking $Machine ..." -ForegroundColor Cyan
 
     try {
-        Write-Log "[$ComputerName] Running gpupdate /force..."
-        Invoke-Command -ComputerName $ComputerName -ScriptBlock {
-            Start-Process "gpupdate.exe" -ArgumentList "/force" -Wait
-        }
-        Write-Log "[$ComputerName] Group Policy refreshed."
+        # Query installed applications remotely via registry
+        $BluePrism = Invoke-Command -ComputerName $Machine -ScriptBlock {
+            $paths = @(
+                "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+                "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+            )
 
-        Write-Log "[$ComputerName] Running Chrome and Edge updates..."
-        $Versions = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
-            $results = [ordered]@{}
-
-            $chromeUpdate = "C:\Program Files (x86)\Google\Update\GoogleUpdate.exe"
-            $edgeUpdate   = "C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe"
-
-            if (Test-Path $chromeUpdate) {
-                Start-Process -FilePath $chromeUpdate -ArgumentList "/ua /installsource scheduler" -Wait
+            foreach ($path in $paths) {
+                Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
+                    Where-Object { $_.DisplayName -like "*Blue Prism*" }
             }
-            if (Test-Path $edgeUpdate) {
-                Start-Process -FilePath $edgeUpdate -ArgumentList "/update MicrosoftEdge" -Wait
+        } -ErrorAction Stop
+
+        if ($BluePrism) {
+            foreach ($app in $BluePrism) {
+                $Results += [PSCustomObject]@{
+                    ComputerName = $Machine
+                    Version      = $app.DisplayVersion
+                }
             }
-
-            $chromeExe = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-            $edgeExe   = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-            $results.ChromeVersion = if (Test-Path $chromeExe) { (Get-Item $chromeExe).VersionInfo.ProductVersion } else { "Not Installed" }
-            $results.EdgeVersion   = if (Test-Path $edgeExe) { (Get-Item $edgeExe).VersionInfo.ProductVersion } else { "Not Installed" }
-            return $results
         }
-
-        foreach ($v in $Versions) {
-            Write-Log "[$ComputerName] Chrome: $($v.ChromeVersion) | Edge: $($v.EdgeVersion)"
-            $Result.ChromeVersion = $v.ChromeVersion
-            $Result.EdgeVersion   = $v.EdgeVersion
+        else {
+            # No Blue Prism found
+            $Results += [PSCustomObject]@{
+                ComputerName = $Machine
+                Version      = "Not Installed"
+            }
         }
-
-        $Result.Status = "Success"
     }
     catch {
-        $Result.Status = "Error"
-        $Result.Notes = $_.Exception.Message
-        Write-Log "[$ComputerName] ERROR: $($_.Exception.Message)"
+        # Machine unreachable or access denied
+        $Results += [PSCustomObject]@{
+            ComputerName = $Machine
+            Version      = "Error: $($_.Exception.Message)"
+        }
     }
-
-    $Summary += $Result
 }
 
-# --- MAIN LOOP ---
-Write-Log "Starting browser update run on $(($MachineList).Count) machines..."
-$Total = $MachineList.Count
-$Count = 0
+# Export results to CSV
+$Results | Export-Csv -Path $OutputFile -NoTypeInformation
 
-foreach ($Machine in $MachineList) {
-    $Count++
-    $Percent = [int](($Count / $Total) * 100)
-    Write-Progress -Activity "Updating browsers on remote machines..." `
-                   -Status "Processing $Machine ($Count of $Total)" `
-                   -PercentComplete $Percent
-    Invoke-RemoteUpdate -ComputerName $Machine.Trim()
-}
-
-Write-Progress -Activity "Updating browsers on remote machines..." -Completed
-Write-Log "Update process complete."
-
-Write-Host "`n===== SUMMARY REPORT =====" -ForegroundColor Cyan
-$Summary | Format-Table -AutoSize
-
-$CsvFile = $LogFile -replace '\.log$', '.csv'
-$Summary | Export-Csv -Path $CsvFile -NoTypeInformation
-Write-Host "`nSummary saved to: $CsvFile"
+Write-Host "Scan complete! Results saved to $OutputFile" -ForegroundColor Green
