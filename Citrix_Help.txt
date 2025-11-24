@@ -12,29 +12,40 @@ if (-not (Test-Connection -ComputerName $ComputerName -Count 1 -Quiet)) {
 }
 
 try {
-    # Query applied COMPUTER policies
-    $computerGpos = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
-        gpresult /SCOPE COMPUTER /V | Select-String "Applied Group Policy Objects"
+    # Run gpresult remotely
+    $gpResult = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+        gpresult /V
     }
 
-    # Query applied USER policies (for SYSTEM user context this may be empty)
-    $userGpos = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
-        gpresult /SCOPE USER /V | Select-String "Applied Group Policy Objects"
+    # Convert output to string array
+    $gpResultLines = $gpResult -split "`r?`n"
+
+    # Function to extract applied GPOs
+    function Get-AppliedGPOs {
+        param([string[]]$Lines, [string]$Scope)
+        $startIndex = $Lines.IndexOf($Lines | Where-Object { $_ -match "Applied Group Policy Objects for $Scope" })
+        if ($startIndex -ge 0) {
+            $gpoList = @()
+            for ($i = $startIndex + 1; $i -lt $Lines.Count; $i++) {
+                if ($Lines[$i] -match "^\s*$") { break }  # stop at blank line
+                $gpoList += $Lines[$i].Trim()
+            }
+            return $gpoList
+        } else {
+            return @()
+        }
     }
+
+    $computerGPOs = Get-AppliedGPOs -Lines $gpResultLines -Scope "Computer"
+    $userGPOs = Get-AppliedGPOs -Lines $gpResultLines -Scope "User"
 
     Write-Host "`n=== COMPUTER APPLIED GPOs ===" -ForegroundColor Yellow
-    $computerGpos -replace "Applied Group Policy Objects", "" | ForEach-Object {
-        $_.ToString().Trim()
-    }
+    if ($computerGPOs) { $computerGPOs | ForEach-Object { Write-Host $_ } } 
+    else { Write-Host "(None found)" }
 
     Write-Host "`n=== USER APPLIED GPOs ===" -ForegroundColor Yellow
-    if ($userGpos) {
-        $userGpos -replace "Applied Group Policy Objects", "" | ForEach-Object {
-            $_.ToString().Trim()
-        }
-    } else {
-        Write-Host "(No user policies returned — service account or no interactive user.)"
-    }
+    if ($userGPOs) { $userGPOs | ForEach-Object { Write-Host $_ } } 
+    else { Write-Host "(None found)" }
 
 } catch {
     Write-Error $_.Exception.Message
