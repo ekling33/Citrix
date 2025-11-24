@@ -1,58 +1,41 @@
-# Path to the machine list
-$MachineList = "machines.txt"
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$ComputerName
+)
 
-# Output CSV
-$OutputFile = "BluePrismVersions.csv"
+Write-Host "Collecting applied Group Policies from $ComputerName..." -ForegroundColor Cyan
 
-# Prepare results array
-$Results = @()
-
-# Read machine names
-$Machines = Get-Content -Path $MachineList
-
-foreach ($Machine in $Machines) {
-    Write-Host "Checking $Machine ..." -ForegroundColor Cyan
-
-    try {
-        # Query installed applications remotely via registry
-        $BluePrism = Invoke-Command -ComputerName $Machine -ScriptBlock {
-            $paths = @(
-                "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
-                "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
-            )
-
-            foreach ($path in $paths) {
-                Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
-                    Where-Object { $_.DisplayName -like "*Blue Prism*" }
-            }
-        } -ErrorAction Stop
-
-        if ($BluePrism) {
-            foreach ($app in $BluePrism) {
-                $Results += [PSCustomObject]@{
-                    ComputerName = $Machine
-                    Version      = $app.DisplayVersion
-                }
-            }
-        }
-        else {
-            # No Blue Prism found
-            $Results += [PSCustomObject]@{
-                ComputerName = $Machine
-                Version      = "Not Installed"
-            }
-        }
-    }
-    catch {
-        # Machine unreachable or access denied
-        $Results += [PSCustomObject]@{
-            ComputerName = $Machine
-            Version      = "Error: $($_.Exception.Message)"
-        }
-    }
+# Test connectivity first
+if (-not (Test-Connection -ComputerName $ComputerName -Count 1 -Quiet)) {
+    Write-Error "Unable to reach $ComputerName."
+    exit
 }
 
-# Export results to CSV
-$Results | Export-Csv -Path $OutputFile -NoTypeInformation
+try {
+    # Query applied COMPUTER policies
+    $computerGpos = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+        gpresult /SCOPE COMPUTER /V | Select-String "Applied Group Policy Objects"
+    }
 
-Write-Host "Scan complete! Results saved to $OutputFile" -ForegroundColor Green
+    # Query applied USER policies (for SYSTEM user context this may be empty)
+    $userGpos = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+        gpresult /SCOPE USER /V | Select-String "Applied Group Policy Objects"
+    }
+
+    Write-Host "`n=== COMPUTER APPLIED GPOs ===" -ForegroundColor Yellow
+    $computerGpos -replace "Applied Group Policy Objects", "" | ForEach-Object {
+        $_.ToString().Trim()
+    }
+
+    Write-Host "`n=== USER APPLIED GPOs ===" -ForegroundColor Yellow
+    if ($userGpos) {
+        $userGpos -replace "Applied Group Policy Objects", "" | ForEach-Object {
+            $_.ToString().Trim()
+        }
+    } else {
+        Write-Host "(No user policies returned — service account or no interactive user.)"
+    }
+
+} catch {
+    Write-Error $_.Exception.Message
+}
